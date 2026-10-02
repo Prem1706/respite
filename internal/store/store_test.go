@@ -204,3 +204,46 @@ func TestMatch(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteToExpiredKeyReportsExpiry(t *testing.T) {
+	s, c := newTestStore()
+	var expired []string
+	s.OnExpire(func(k string) { expired = append(expired, k) })
+	s.Set("k", []byte("5"), SetOptions{ExpireAt: c.ms + 10})
+	c.ms += 10
+	s.Get("k") // reads hide the key but don't delete it
+	if len(expired) != 0 {
+		t.Fatal("a read reported an expiry")
+	}
+	if n, _ := s.IncrBy("k", 1); n != 1 {
+		t.Fatalf("INCR on an expired key = %d, want 1", n)
+	}
+	if len(expired) != 1 || expired[0] != "k" {
+		t.Fatalf("expired = %v, want [k]", expired)
+	}
+	if s.TTL("k") != -1 {
+		t.Fatal("the new key should not inherit the old TTL")
+	}
+}
+
+func TestPassiveStoreNeverExpiresKeys(t *testing.T) {
+	s, c := newTestStore()
+	s.SetPassive(true)
+	s.Set("k", []byte("5"), SetOptions{ExpireAt: c.ms + 10})
+	c.ms += 20
+	if _, ok := s.Get("k"); ok {
+		t.Fatal("reads must still hide expired keys")
+	}
+	// A write applies to the expired entry, exactly as it did on the leader
+	// when the key was still live.
+	if n, _ := s.IncrBy("k", 1); n != 6 {
+		t.Fatalf("got %d, want 6", n)
+	}
+	if s.ActiveExpire() != 0 || s.Len() != 1 {
+		t.Fatal("a passive store deleted a key itself")
+	}
+	s.SetPassive(false)
+	if s.ActiveExpire() != 1 {
+		t.Fatal("ActiveExpire should resume once the store is no longer passive")
+	}
+}

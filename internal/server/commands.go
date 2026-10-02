@@ -73,6 +73,10 @@ func (s *Server) dispatch(c *client, args [][]byte) {
 	case len(c.subs) > 0 && !cmd.pubsub:
 		c.w.Error("ERR Can't execute '" + name + "': only SUBSCRIBE / UNSUBSCRIBE / PING / QUIT are allowed in this context")
 	default:
+		if cmd.write {
+			s.writeMu.Lock()
+			defer s.writeMu.Unlock()
+		}
 		cmd.fn(s, c, args)
 	}
 }

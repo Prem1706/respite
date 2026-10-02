@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -331,4 +332,66 @@ func TestAOFRestart(t *testing.T) {
 
 	clock.advance(6 * time.Second)
 	expect(t, c.do("GET", "session"), "(nil)")
+}
+
+// Before writes held writeMu, two clients setting the same key at once could
+// be applied in one order and logged in the other, so a restart brought back
+// the wrong value. Here 20 clients race on each of 50 keys.
+func TestAOFOrderMatchesConcurrentWrites(t *testing.T) {
+	testHookBeforeLog = func() { time.Sleep(time.Duration(rand.IntN(100)) * time.Microsecond) }
+	t.Cleanup(func() { testHookBeforeLog = nil })
+	path := filepath.Join(t.TempDir(), "appendonly.aof")
+	cfg := Config{AOFPath: path, Fsync: aof.FsyncNo}
+	s := start(t, cfg)
+
+	const keys = 50
+	var wg sync.WaitGroup
+	for i := range 20 {
+		c := dial(t, s)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for k := range keys {
+				c.do("SET", fmt.Sprint("k", k), fmt.Sprint(i))
+			}
+		}()
+	}
+	wg.Wait()
+	c := dial(t, s)
+	want := make([]string, keys)
+	for k := range keys {
+		want[k] = c.do("GET", fmt.Sprint("k", k))
+	}
+	s.Close()
+
+	c = dial(t, start(t, cfg))
+	for k := range keys {
+		expect(t, c.do("GET", fmt.Sprint("k", k)), want[k])
+	}
+}
+
+// Before the store became passive during replay, this key came back as 1
+// with no expiry and never went away.
+func TestAOFReplayDoesNotResurrectExpiredKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "appendonly.aof")
+	clock := newFakeClock()
+	cfg := Config{AOFPath: path, Fsync: aof.FsyncAlways, Clock: clock.now}
+
+	s := start(t, cfg)
+	c := dial(t, s)
+	c.do("SET", "k", "5", "PX", "1000")
+	expect(t, c.do("INCR", "k"), "6")
+	s.Close()
+
+	clock.advance(2 * time.Second) // k has expired by the time we restart
+	s = start(t, cfg)
+	c = dial(t, s)
+	expect(t, c.do("GET", "k"), "(nil)")
+	expect(t, c.do("INCR", "k"), "1") // a write sees it as gone, and logs a DEL first
+	expect(t, c.do("TTL", "k"), "-1")
+	s.Close()
+
+	c = dial(t, start(t, cfg))
+	expect(t, c.do("GET", "k"), "1")
+	expect(t, c.do("TTL", "k"), "-1")
 }

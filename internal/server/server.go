@@ -5,6 +5,11 @@
 // behind a read/write mutex. Real Redis runs every command on a single
 // thread instead. Here, reads (GET, EXISTS, TTL) can run in parallel across
 // CPU cores, while writes take turns.
+//
+// Write commands also hold Server.writeMu from the moment they touch the
+// store until their entry is in the log. Without it, two clients setting the
+// same key at once could be applied in one order and logged in the other,
+// and a restart would bring back the wrong value.
 package server
 
 import (
@@ -34,6 +39,9 @@ type Server struct {
 	log     *slog.Logger
 	started time.Time
 
+	// writeMu makes "apply to the store, then append to the log" one step.
+	writeMu sync.Mutex
+
 	mu      sync.Mutex
 	ln      net.Listener
 	clients map[*client]struct{}
@@ -62,9 +70,15 @@ func New(cfg Config) (*Server, error) {
 		s.log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 
+	// When the store deletes an expired key, log a DEL so that replay (and
+	// followers) delete it at the same point instead of deciding for themselves.
+	s.store.OnExpire(func(key string) { s.propagate(nil, []byte("DEL"), []byte(key)) })
+
 	if cfg.AOFPath != "" {
 		start := time.Now()
+		s.store.SetPassive(true) // replay must not expire keys on its own; see package store
 		n, truncated, err := aof.Replay(cfg.AOFPath, s.replay)
+		s.store.SetPassive(false)
 		if err != nil {
 			return nil, err
 		}
@@ -181,15 +195,29 @@ func (s *Server) expiryLoop() {
 		case <-s.stop:
 			return
 		case <-t.C:
-			s.store.ActiveExpire()
+			for more := true; more; {
+				s.writeMu.Lock() // the DELs this logs must be ordered with other writes
+				_, more = s.store.ExpireRound()
+				s.writeMu.Unlock()
+			}
 		}
 	}
 }
 
-// propagate appends a write command to the AOF.
+// testHookBeforeLog, if set, runs between a write being applied and logged.
+// Tests use it to widen that gap and make ordering bugs show up reliably.
+var testHookBeforeLog func()
+
+// propagate appends a write command to the AOF. Callers hold s.writeMu.
+// c is the client whose command caused the write, or nil.
 func (s *Server) propagate(c *client, args ...[]byte) {
+	if testHookBeforeLog != nil {
+		testHookBeforeLog()
+	}
 	if s.aof != nil {
 		s.aof.Append(args)
-		c.dirty = true
+		if c != nil {
+			c.dirty = true
+		}
 	}
 }

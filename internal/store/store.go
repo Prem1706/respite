@@ -8,6 +8,17 @@
 //   - Actively. ActiveExpire, run ten times a second, samples keys that have
 //     a TTL and deletes the expired ones, so memory is reclaimed for keys
 //     that nobody reads again.
+//
+// Only one place decides that a key has expired: the leader's own store.
+// Whenever it deletes an expired key it calls the OnExpire hook, and the
+// server logs a DEL. While replaying the AOF, or running as a follower, the
+// store is passive: it never deletes expired keys itself and waits for those
+// DELs instead. Reads still hide expired keys.
+//
+// Without this, replaying "INCR k" after k's TTL has passed would treat k as
+// missing and recreate it as 1 with no expiry: a key that should be gone
+// would live forever. A follower whose clock is slightly ahead would make
+// the same mistake.
 package store
 
 import (
@@ -34,10 +45,12 @@ func (e entry) expired(now int64) bool { return e.expireAt != 0 && e.expireAt <=
 // write always stores a new slice. That means a []byte handed out by Get
 // stays valid after the lock is released, even if the key is overwritten.
 type Store struct {
-	mu      sync.RWMutex
-	data    map[string]entry
-	expires map[string]struct{} // the keys that have a TTL, for ActiveExpire
-	now     func() int64
+	mu       sync.RWMutex
+	data     map[string]entry
+	expires  map[string]struct{} // the keys that have a TTL, for ActiveExpire
+	now      func() int64
+	passive  bool
+	onExpire func(key string)
 }
 
 func New() *Store {
@@ -56,6 +69,21 @@ func NewWithClock(now func() int64) *Store {
 // Now returns the store's current time in Unix milliseconds.
 func (s *Store) Now() int64 { return s.now() }
 
+// SetPassive turns passive expiry on or off. See the package comment.
+func (s *Store) SetPassive(passive bool) {
+	s.mu.Lock()
+	s.passive = passive
+	s.mu.Unlock()
+}
+
+// OnExpire sets a function to call whenever an expired key is deleted. It is
+// called with the store's lock held, so it must not call back into the store.
+func (s *Store) OnExpire(fn func(key string)) {
+	s.mu.Lock()
+	s.onExpire = fn
+	s.mu.Unlock()
+}
+
 // lookup returns the entry for key if it exists and has not expired.
 // Deleting an expired entry needs the write lock, which readers don't hold,
 // so that is left to writers and ActiveExpire.
@@ -65,6 +93,29 @@ func (s *Store) lookup(key string, now int64) (entry, bool) {
 		return entry{}, false
 	}
 	return e, true
+}
+
+// lookupWrite is lookup for code that is about to modify key. An expired
+// entry is deleted (and reported to onExpire) so the write starts from a
+// missing key. In passive mode the entry is returned as if still live,
+// because only the leader's DEL may remove it.
+func (s *Store) lookupWrite(key string, now int64) (entry, bool) {
+	e, ok := s.data[key]
+	if !ok {
+		return entry{}, false
+	}
+	if e.expired(now) && !s.passive {
+		s.expire(key)
+		return entry{}, false
+	}
+	return e, true
+}
+
+func (s *Store) expire(key string) {
+	s.remove(key)
+	if s.onExpire != nil {
+		s.onExpire(key)
+	}
 }
 
 func (s *Store) put(key string, e entry) {
@@ -99,7 +150,7 @@ type SetOptions struct {
 func (s *Store) Set(key string, val []byte, opt SetOptions) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	old, exists := s.lookup(key, s.now())
+	old, exists := s.lookupWrite(key, s.now())
 	if (opt.NX && exists) || (opt.XX && !exists) {
 		return false
 	}
@@ -127,7 +178,7 @@ func (s *Store) Del(keys ...string) int {
 	defer s.mu.Unlock()
 	now, n := s.now(), 0
 	for _, k := range keys {
-		if _, ok := s.lookup(k, now); ok {
+		if _, ok := s.lookupWrite(k, now); ok {
 			n++
 		}
 		s.remove(k)
@@ -154,7 +205,7 @@ func (s *Store) Exists(keys ...string) int {
 func (s *Store) IncrBy(key string, delta int64) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e, ok := s.lookup(key, s.now())
+	e, ok := s.lookupWrite(key, s.now())
 	var n int64
 	if ok {
 		var err error
@@ -177,7 +228,7 @@ func (s *Store) ExpireAt(key string, at int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	e, ok := s.lookup(key, now)
+	e, ok := s.lookupWrite(key, now)
 	if !ok {
 		return false
 	}
@@ -194,7 +245,7 @@ func (s *Store) ExpireAt(key string, at int64) bool {
 func (s *Store) Persist(key string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e, ok := s.lookup(key, s.now())
+	e, ok := s.lookupWrite(key, s.now())
 	if !ok || e.expireAt == 0 {
 		return false
 	}
@@ -257,28 +308,39 @@ const expireSample = 20
 // sample had expired, since that suggests many more are waiting. Each round
 // holds the lock only briefly, so clients are never blocked for long, but the
 // share of expired keys still left in memory stays small.
-//
-// Go randomises the starting point of map iteration, so the first 20 keys of
-// a range loop are a cheap random-ish sample.
 func (s *Store) ActiveExpire() int {
 	total := 0
 	for {
-		s.mu.Lock()
-		now, sampled, expired := s.now(), 0, 0
-		for k := range s.expires {
-			if sampled == expireSample {
-				break
-			}
-			sampled++
-			if s.data[k].expired(now) {
-				s.remove(k) // deleting during range is allowed in Go
-				expired++
-			}
-		}
-		s.mu.Unlock()
+		expired, more := s.ExpireRound()
 		total += expired
-		if sampled < expireSample || expired*4 <= sampled {
+		if !more {
 			return total
 		}
 	}
+}
+
+// ExpireRound runs one sampling round of ActiveExpire. It reports how many
+// keys it deleted and whether another round is worthwhile. It does nothing
+// in passive mode.
+//
+// Go randomises the starting point of map iteration, so the first 20 keys of
+// a range loop are a cheap random-ish sample.
+func (s *Store) ExpireRound() (expired int, more bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.passive {
+		return 0, false
+	}
+	now, sampled := s.now(), 0
+	for k := range s.expires {
+		if sampled == expireSample {
+			break
+		}
+		sampled++
+		if s.data[k].expired(now) {
+			s.expire(k) // deleting during range is allowed in Go
+			expired++
+		}
+	}
+	return expired, sampled == expireSample && expired*4 > sampled
 }
