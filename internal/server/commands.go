@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -23,33 +24,45 @@ var commands map[string]command
 
 func init() {
 	commands = map[string]command{
-		"ping":        {arity: -1, fn: cmdPing, pubsub: true},
-		"echo":        {arity: 2, fn: cmdEcho},
-		"get":         {arity: 2, fn: cmdGet},
-		"set":         {arity: -3, fn: cmdSet, write: true},
-		"mget":        {arity: -2, fn: cmdMGet},
-		"mset":        {arity: -3, fn: cmdMSet, write: true},
-		"del":         {arity: -2, fn: cmdDel, write: true},
-		"exists":      {arity: -2, fn: cmdExists},
-		"incr":        {arity: 2, fn: incrBy(1), write: true},
-		"decr":        {arity: 2, fn: incrBy(-1), write: true},
-		"incrby":      {arity: 3, fn: incrBy(0), write: true},
-		"decrby":      {arity: 3, fn: incrBy(0), write: true},
-		"expire":      {arity: 3, fn: expire(time.Second, false), write: true},
-		"pexpire":     {arity: 3, fn: expire(time.Millisecond, false), write: true},
-		"expireat":    {arity: 3, fn: expire(time.Second, true), write: true},
-		"pexpireat":   {arity: 3, fn: expire(time.Millisecond, true), write: true},
-		"ttl":         {arity: 2, fn: ttl(time.Second)},
-		"pttl":        {arity: 2, fn: ttl(time.Millisecond)},
-		"persist":     {arity: 2, fn: cmdPersist, write: true},
-		"keys":        {arity: 2, fn: cmdKeys},
-		"dbsize":      {arity: 1, fn: cmdDBSize},
-		"flushall":    {arity: -1, fn: cmdFlushAll, write: true},
-		"publish":     {arity: 3, fn: cmdPublish},
-		"subscribe":   {arity: -2, fn: cmdSubscribe, pubsub: true},
-		"unsubscribe": {arity: -1, fn: cmdUnsubscribe, pubsub: true},
-		"info":        {arity: -1, fn: cmdInfo},
-		"quit":        {arity: -1, fn: cmdQuit, pubsub: true},
+		"ping":          {arity: -1, fn: cmdPing, pubsub: true},
+		"echo":          {arity: 2, fn: cmdEcho},
+		"get":           {arity: 2, fn: cmdGet},
+		"set":           {arity: -3, fn: cmdSet, write: true},
+		"mget":          {arity: -2, fn: cmdMGet},
+		"mset":          {arity: -3, fn: cmdMSet, write: true},
+		"del":           {arity: -2, fn: cmdDel, write: true},
+		"exists":        {arity: -2, fn: cmdExists},
+		"incr":          {arity: 2, fn: incrBy(1), write: true},
+		"decr":          {arity: 2, fn: incrBy(-1), write: true},
+		"incrby":        {arity: 3, fn: incrBy(0), write: true},
+		"decrby":        {arity: 3, fn: incrBy(0), write: true},
+		"expire":        {arity: 3, fn: expire(time.Second, false), write: true},
+		"pexpire":       {arity: 3, fn: expire(time.Millisecond, false), write: true},
+		"expireat":      {arity: 3, fn: expire(time.Second, true), write: true},
+		"pexpireat":     {arity: 3, fn: expire(time.Millisecond, true), write: true},
+		"ttl":           {arity: 2, fn: ttl(time.Second)},
+		"pttl":          {arity: 2, fn: ttl(time.Millisecond)},
+		"persist":       {arity: 2, fn: cmdPersist, write: true},
+		"keys":          {arity: 2, fn: cmdKeys},
+		"type":          {arity: 2, fn: cmdType},
+		"dbsize":        {arity: 1, fn: cmdDBSize},
+		"flushall":      {arity: -1, fn: cmdFlushAll, write: true},
+		"zadd":          {arity: -4, fn: cmdZAdd, write: true},
+		"zincrby":       {arity: 4, fn: cmdZIncrBy, write: true},
+		"zrem":          {arity: -3, fn: cmdZRem, write: true},
+		"zscore":        {arity: 3, fn: cmdZScore},
+		"zcard":         {arity: 2, fn: cmdZCard},
+		"zrank":         {arity: 3, fn: zrank(false)},
+		"zrevrank":      {arity: 3, fn: zrank(true)},
+		"zrange":        {arity: -4, fn: zrange(false)},
+		"zrevrange":     {arity: -4, fn: zrange(true)},
+		"zrangebyscore": {arity: -4, fn: cmdZRangeByScore},
+		"zcount":        {arity: 4, fn: cmdZCount},
+		"publish":       {arity: 3, fn: cmdPublish},
+		"subscribe":     {arity: -2, fn: cmdSubscribe, pubsub: true},
+		"unsubscribe":   {arity: -1, fn: cmdUnsubscribe, pubsub: true},
+		"info":          {arity: -1, fn: cmdInfo},
+		"quit":          {arity: -1, fn: cmdQuit, pubsub: true},
 		// redis-cli and redis-benchmark send these on connect. Empty replies
 		// are enough to keep them happy.
 		"command": {arity: -1, fn: emptyArray},
@@ -109,9 +122,13 @@ func cmdPing(s *Server, c *client, args [][]byte) {
 func cmdEcho(s *Server, c *client, args [][]byte) { c.w.Bulk(args[1]) }
 
 func cmdGet(s *Server, c *client, args [][]byte) {
-	if v, ok := s.store.Get(string(args[1])); ok {
+	v, ok, err := s.store.Get(string(args[1]))
+	switch {
+	case err != nil:
+		replyErr(c, err)
+	case ok:
 		c.w.Bulk(v)
-	} else {
+	default:
 		c.w.Null()
 	}
 }
@@ -196,7 +213,7 @@ func toUnixMs(n int64, unit time.Duration, absolute bool, now int64) (int64, boo
 func cmdMGet(s *Server, c *client, args [][]byte) {
 	c.w.Array(len(args) - 1)
 	for _, k := range args[1:] {
-		if v, ok := s.store.Get(string(k)); ok {
+		if v, ok, _ := s.store.Get(string(k)); ok { // other types read as nil, as in Redis
 			c.w.Bulk(v)
 		} else {
 			c.w.Null()
@@ -246,7 +263,7 @@ func incrBy(delta int64) func(*Server, *client, [][]byte) {
 		}
 		n, err := s.store.IncrBy(string(args[1]), d)
 		if err != nil {
-			c.w.Error("ERR " + err.Error())
+			replyErr(c, err)
 			return
 		}
 		s.propagate(c, args...) // deterministic, so safe to log as sent
@@ -302,6 +319,10 @@ func cmdKeys(s *Server, c *client, args [][]byte) {
 	for _, k := range ks {
 		c.w.BulkString(k)
 	}
+}
+
+func cmdType(s *Server, c *client, args [][]byte) {
+	c.w.SimpleString(s.store.Type(string(args[1])))
 }
 
 func cmdDBSize(s *Server, c *client, args [][]byte) { c.w.Integer(int64(s.store.Len())) }
@@ -399,6 +420,16 @@ func cmdConfig(s *Server, c *client, args [][]byte) {
 	c.w.Array(2)
 	c.w.BulkString(param)
 	c.w.BulkString(v)
+}
+
+// replyErr writes a store error. Errors that already carry a Redis error
+// code, like WRONGTYPE, are sent as they are; the rest get "ERR".
+func replyErr(c *client, err error) {
+	if errors.Is(err, store.ErrWrongType) {
+		c.w.Error(err.Error())
+		return
+	}
+	c.w.Error("ERR " + err.Error())
 }
 
 func keys(args [][]byte) []string {

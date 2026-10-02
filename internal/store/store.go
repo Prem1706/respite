@@ -27,23 +27,28 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/Prem1706/respite/internal/zset"
 )
 
 var (
 	ErrNotInteger = errors.New("value is not an integer or out of range")
 	ErrOverflow   = errors.New("increment or decrement would overflow")
+	ErrWrongType  = errors.New("WRONGTYPE Operation against a key holding the wrong kind of value")
 )
 
 type entry struct {
-	val      []byte
+	val      any   // []byte for a string, *zset.ZSet for a sorted set
 	expireAt int64 // Unix milliseconds; 0 means the key never expires
 }
 
 func (e entry) expired(now int64) bool { return e.expireAt != 0 && e.expireAt <= now }
 
-// Store is safe for concurrent use. Values are never modified in place; a
-// write always stores a new slice. That means a []byte handed out by Get
-// stays valid after the lock is released, even if the key is overwritten.
+// Store is safe for concurrent use. String values are never modified in
+// place; a write always stores a new slice. That means a []byte handed out by
+// Get stays valid after the lock is released, even if the key is
+// overwritten. Sorted sets are modified in place, so they are only ever
+// touched inside UpdateZSet and ReadZSet, with the lock held.
 type Store struct {
 	mu       sync.RWMutex
 	data     map[string]entry
@@ -132,11 +137,35 @@ func (s *Store) remove(key string) {
 	delete(s.expires, key)
 }
 
-func (s *Store) Get(key string) ([]byte, bool) {
+// Get returns the string stored at key. It returns ErrWrongType if the key
+// holds another type.
+func (s *Store) Get(key string) ([]byte, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	e, ok := s.lookup(key, s.now())
-	return e.val, ok
+	if !ok {
+		return nil, false, nil
+	}
+	b, isString := e.val.([]byte)
+	if !isString {
+		return nil, false, ErrWrongType
+	}
+	return b, true, nil
+}
+
+// Type returns "string", "zset", or "none" if the key doesn't exist.
+func (s *Store) Type(key string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	e, ok := s.lookup(key, s.now())
+	switch {
+	case !ok:
+		return "none"
+	case isZSet(e.val):
+		return "zset"
+	default:
+		return "string"
+	}
 }
 
 type SetOptions struct {
@@ -208,8 +237,12 @@ func (s *Store) IncrBy(key string, delta int64) (int64, error) {
 	e, ok := s.lookupWrite(key, s.now())
 	var n int64
 	if ok {
+		b, isString := e.val.([]byte)
+		if !isString {
+			return 0, ErrWrongType
+		}
 		var err error
-		if n, err = strconv.ParseInt(string(e.val), 10, 64); err != nil {
+		if n, err = strconv.ParseInt(string(b), 10, 64); err != nil {
 			return 0, ErrNotInteger
 		}
 	}
@@ -239,6 +272,57 @@ func (s *Store) ExpireAt(key string, at int64) bool {
 	e.expireAt = at
 	s.put(key, e)
 	return true
+}
+
+func isZSet(v any) bool {
+	_, ok := v.(*zset.ZSet)
+	return ok
+}
+
+// UpdateZSet runs fn on the sorted set at key with the write lock held. If
+// the key doesn't exist, fn is only called when create is true, with a new
+// empty set. A set left empty afterwards is deleted, as Redis does.
+//
+// fn must not keep z, or anything that refers into it, after it returns.
+func (s *Store) UpdateZSet(key string, create bool, fn func(z *zset.ZSet)) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.lookupWrite(key, s.now())
+	if ok && !isZSet(e.val) {
+		return ErrWrongType
+	}
+	if !ok {
+		if !create {
+			return nil
+		}
+		e = entry{val: zset.New()}
+	}
+	z := e.val.(*zset.ZSet)
+	fn(z)
+	if z.Len() == 0 {
+		s.remove(key)
+	} else {
+		s.put(key, e)
+	}
+	return nil
+}
+
+// ReadZSet runs fn on the sorted set at key with the read lock held. fn is
+// not called if the key doesn't exist. Other readers can run at the same
+// time, so fn must not modify z.
+func (s *Store) ReadZSet(key string, fn func(z *zset.ZSet)) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	e, ok := s.lookup(key, s.now())
+	if !ok {
+		return nil
+	}
+	z, isZ := e.val.(*zset.ZSet)
+	if !isZ {
+		return ErrWrongType
+	}
+	fn(z)
+	return nil
 }
 
 // Persist removes key's expiry and reports whether it had one.

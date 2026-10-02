@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+
+	"github.com/Prem1706/respite/internal/zset"
 )
 
 // clock is a fake time source so expiry tests run instantly and deterministically.
@@ -19,11 +21,11 @@ func newTestStore() (*Store, *clock) {
 
 func TestSetGet(t *testing.T) {
 	s, _ := newTestStore()
-	if _, ok := s.Get("k"); ok {
+	if _, ok, _ := s.Get("k"); ok {
 		t.Fatal("empty store returned a value")
 	}
 	s.Set("k", []byte("v"), SetOptions{})
-	if v, ok := s.Get("k"); !ok || string(v) != "v" {
+	if v, ok, _ := s.Get("k"); !ok || string(v) != "v" {
 		t.Fatalf("got %q, %v", v, ok)
 	}
 }
@@ -39,7 +41,7 @@ func TestSetNXXX(t *testing.T) {
 	if s.Set("k", []byte("2"), SetOptions{NX: true}) {
 		t.Fatal("NX overwrote an existing key")
 	}
-	if v, _ := s.Get("k"); string(v) != "1" {
+	if v, _, _ := s.Get("k"); string(v) != "1" {
 		t.Fatalf("got %q", v)
 	}
 }
@@ -51,11 +53,11 @@ func TestExpiry(t *testing.T) {
 		t.Fatalf("TTL = %d, want 100", ttl)
 	}
 	c.ms += 99
-	if _, ok := s.Get("k"); !ok {
+	if _, ok, _ := s.Get("k"); !ok {
 		t.Fatal("key expired early")
 	}
 	c.ms++
-	if _, ok := s.Get("k"); ok {
+	if _, ok, _ := s.Get("k"); ok {
 		t.Fatal("expired key is still visible")
 	}
 	if ttl := s.TTL("k"); ttl != -2 {
@@ -138,7 +140,7 @@ func TestConcurrentIncr(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if v, _ := s.Get("n"); string(v) != "10000" {
+	if v, _, _ := s.Get("n"); string(v) != "10000" {
 		t.Fatalf("lost updates: got %s, want 10000", v)
 	}
 }
@@ -231,7 +233,7 @@ func TestPassiveStoreNeverExpiresKeys(t *testing.T) {
 	s.SetPassive(true)
 	s.Set("k", []byte("5"), SetOptions{ExpireAt: c.ms + 10})
 	c.ms += 20
-	if _, ok := s.Get("k"); ok {
+	if _, ok, _ := s.Get("k"); ok {
 		t.Fatal("reads must still hide expired keys")
 	}
 	// A write applies to the expired entry, exactly as it did on the leader
@@ -245,5 +247,42 @@ func TestPassiveStoreNeverExpiresKeys(t *testing.T) {
 	s.SetPassive(false)
 	if s.ActiveExpire() != 1 {
 		t.Fatal("ActiveExpire should resume once the store is no longer passive")
+	}
+}
+
+func TestTypes(t *testing.T) {
+	s, _ := newTestStore()
+	s.Set("str", []byte("1"), SetOptions{})
+	s.UpdateZSet("z", true, func(z *zset.ZSet) { z.Add("a", 1) })
+	if s.Type("str") != "string" || s.Type("z") != "zset" || s.Type("none") != "none" {
+		t.Fatal("wrong types")
+	}
+	if _, _, err := s.Get("z"); err != ErrWrongType {
+		t.Fatalf("GET on a zset: got %v", err)
+	}
+	if _, err := s.IncrBy("z", 1); err != ErrWrongType {
+		t.Fatalf("INCR on a zset: got %v", err)
+	}
+	if err := s.UpdateZSet("str", true, func(*zset.ZSet) {}); err != ErrWrongType {
+		t.Fatalf("ZADD on a string: got %v", err)
+	}
+	// SET replaces a value of any type.
+	s.Set("z", []byte("now a string"), SetOptions{})
+	if s.Type("z") != "string" {
+		t.Fatal("SET should replace a zset")
+	}
+}
+
+func TestEmptyZSetIsDeleted(t *testing.T) {
+	s, _ := newTestStore()
+	s.UpdateZSet("z", true, func(z *zset.ZSet) { z.Add("a", 1) })
+	s.UpdateZSet("z", false, func(z *zset.ZSet) { z.Remove("a") })
+	if s.Exists("z") != 0 {
+		t.Fatal("an empty sorted set should not exist")
+	}
+	called := false
+	s.UpdateZSet("missing", false, func(*zset.ZSet) { called = true })
+	if called || s.Exists("missing") != 0 {
+		t.Fatal("create=false must not create a key")
 	}
 }
