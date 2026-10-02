@@ -9,6 +9,11 @@
 // A ZSet is not safe for concurrent use. The store guards it with its lock.
 package zset
 
+import (
+	"math"
+	"strconv"
+)
+
 type ZSet struct {
 	scores map[string]float64
 	sl     *skipList
@@ -140,3 +145,15 @@ func (z *ZSet) Count(lo, hi Bound) int {
 
 // All returns every member in ascending order.
 func (z *ZSet) All() []Member { return z.Range(0, -1, false) }
+
+// FormatScore prints the shortest form that parses back to exactly the same
+// float, so a score survives the AOF and replication without rounding.
+func FormatScore(f float64) string {
+	switch {
+	case math.IsInf(f, 1):
+		return "inf"
+	case math.IsInf(f, -1):
+		return "-inf"
+	}
+	return strconv.FormatFloat(f, 'g', -1, 64)
+}

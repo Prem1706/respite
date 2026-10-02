@@ -18,8 +18,9 @@ type client struct {
 	wmu sync.Mutex
 	w   *resp.Writer
 
-	dirty bool // wrote to the AOF since it was last flushed
-	quit  bool
+	dirty   bool // wrote to the AOF since it was last flushed
+	quit    bool
+	replica *replica // set if this connection is a follower that sent PSYNC
 
 	// Pub/sub. subs is only touched by this client's goroutine. Publishers
 	// don't write to the socket themselves; they queue messages on msgs.
@@ -107,6 +108,9 @@ func (c *client) pump() {
 func (c *client) close() {
 	close(c.done)
 	c.conn.Close()
+	if c.replica != nil {
+		c.s.leader.remove(c.replica)
+	}
 	for ch := range c.subs {
 		c.s.broker.unsubscribe(c, ch)
 	}

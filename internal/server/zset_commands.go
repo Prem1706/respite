@@ -23,17 +23,7 @@ func parseScore(b []byte) (float64, bool) {
 	return f, err == nil && !math.IsNaN(f)
 }
 
-// formatScore prints the shortest form that parses back to exactly the same
-// float, so a score survives the AOF and replication without rounding.
-func formatScore(f float64) string {
-	switch {
-	case math.IsInf(f, 1):
-		return "inf"
-	case math.IsInf(f, -1):
-		return "-inf"
-	}
-	return strconv.FormatFloat(f, 'g', -1, 64)
-}
+func formatScore(f float64) string { return zset.FormatScore(f) }
 
 // parseBound reads a score range bound: "5", "(5" (exclusive), "-inf", "+inf".
 func parseBound(b []byte) (zset.Bound, bool) {

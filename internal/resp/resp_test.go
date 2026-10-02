@@ -110,3 +110,27 @@ func assertArgs(t *testing.T, got [][]byte, want ...string) {
 		}
 	}
 }
+
+func TestOffset(t *testing.T) {
+	cmd1 := "*1\r\n$4\r\nPING\r\n"
+	cmd2 := "*2\r\n$3\r\nGET\r\n$1\r\nk\r\n"
+	r := NewReader(strings.NewReader(cmd1 + cmd2))
+	r.ReadCommand()
+	if r.Offset() != int64(len(cmd1)) {
+		t.Fatalf("offset after one command = %d, want %d", r.Offset(), len(cmd1))
+	}
+	r.ReadCommand()
+	if r.Offset() != int64(len(cmd1+cmd2)) {
+		t.Fatalf("offset after two commands = %d", r.Offset())
+	}
+}
+
+func TestReadBulk(t *testing.T) {
+	r := NewReader(strings.NewReader("$5\r\nhello\r\n$3\r\nab"))
+	if b, err := r.ReadBulk(); err != nil || string(b) != "hello" {
+		t.Fatalf("got %q, %v", b, err)
+	}
+	if _, err := r.ReadBulk(); err != io.ErrUnexpectedEOF {
+		t.Fatalf("truncated bulk: got %v", err)
+	}
+}

@@ -5,14 +5,16 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Prem1706/respite/internal/resp"
 )
 
-func cmd(s string) [][]byte {
+func cmd(s string) []byte {
 	var args [][]byte
 	for _, f := range strings.Fields(s) {
 		args = append(args, []byte(f))
 	}
-	return args
+	return resp.AppendCommand(nil, args)
 }
 
 func replayAll(t *testing.T, path string) ([]string, int64) {

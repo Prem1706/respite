@@ -26,10 +26,12 @@ import (
 )
 
 type Config struct {
-	AOFPath string // empty disables persistence
-	Fsync   aof.FsyncPolicy
-	Clock   func() int64 // Unix milliseconds; tests use a fake one. nil means the real clock.
-	Logger  *slog.Logger
+	AOFPath     string // empty disables persistence
+	Fsync       aof.FsyncPolicy
+	ReplicaOf   string       // leader's host:port; empty means this server is a leader
+	BacklogSize int          // replication backlog in bytes; 0 means 1 MiB
+	Clock       func() int64 // Unix milliseconds; tests use a fake one. nil means the real clock.
+	Logger      *slog.Logger
 }
 
 type Server struct {
@@ -41,13 +43,19 @@ type Server struct {
 
 	// writeMu makes "apply to the store, then append to the log" one step.
 	writeMu sync.Mutex
+	encoded []byte // scratch buffer for propagate, guarded by writeMu
+
+	leader       *leader
+	follower     *follower // nil unless started with ReplicaOf
+	leaderClient *client   // stands in for the leader when applying its commands
 
 	mu      sync.Mutex
 	ln      net.Listener
 	clients map[*client]struct{}
 	closed  bool
 
-	wg        sync.WaitGroup
+	wg        sync.WaitGroup // client connections
+	bg        sync.WaitGroup // background loops
 	stop      chan struct{}
 	closeOnce sync.Once
 	closeErr  error
@@ -69,6 +77,11 @@ func New(cfg Config) (*Server, error) {
 	if s.log == nil {
 		s.log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
+	if cfg.BacklogSize == 0 {
+		cfg.BacklogSize = defaultBacklogSize
+	}
+	s.leader = newLeader(cfg.BacklogSize)
+	s.leaderClient = &client{w: resp.NewWriter(io.Discard)}
 
 	// When the store deletes an expired key, log a DEL so that replay (and
 	// followers) delete it at the same point instead of deciding for themselves.
@@ -91,7 +104,15 @@ func New(cfg Config) (*Server, error) {
 		}
 	}
 
+	s.bg.Add(1)
 	go s.expiryLoop()
+	if cfg.ReplicaOf != "" {
+		// A follower never expires keys itself; it waits for the leader's DELs.
+		s.store.SetPassive(true)
+		s.follower = &follower{addr: cfg.ReplicaOf}
+		s.bg.Add(1)
+		go s.followLoop()
+	}
 	return s, nil
 }
 
@@ -153,10 +174,19 @@ func (s *Server) Close() error {
 		for c := range s.clients {
 			c.conn.Close()
 		}
+		if s.follower != nil {
+			s.follower.mu.Lock()
+			if s.follower.conn != nil {
+				s.follower.conn.Close()
+			}
+			s.follower.mu.Unlock()
+		}
 		s.mu.Unlock()
 
-		s.wg.Wait()
 		close(s.stop)
+		s.wg.Wait()
+		s.bg.Wait()
+		s.leader.close()
 		if s.aof != nil {
 			s.closeErr = s.aof.Close()
 		}
@@ -188,6 +218,7 @@ func (s *Server) clientCount() int {
 
 // expiryLoop runs active expiry ten times a second, as Redis does by default.
 func (s *Server) expiryLoop() {
+	defer s.bg.Done()
 	t := time.NewTicker(100 * time.Millisecond)
 	defer t.Stop()
 	for {
@@ -208,16 +239,24 @@ func (s *Server) expiryLoop() {
 // Tests use it to widen that gap and make ordering bugs show up reliably.
 var testHookBeforeLog func()
 
-// propagate appends a write command to the AOF. Callers hold s.writeMu.
-// c is the client whose command caused the write, or nil.
+// propagate sends a write command to the AOF and to followers. Callers hold
+// s.writeMu. c is the client whose command caused the write, or nil.
 func (s *Server) propagate(c *client, args ...[]byte) {
 	if testHookBeforeLog != nil {
 		testHookBeforeLog()
 	}
+	replicating := s.leader.active.Load()
+	if s.aof == nil && !replicating {
+		return
+	}
+	s.encoded = resp.AppendCommand(s.encoded[:0], args)
 	if s.aof != nil {
-		s.aof.Append(args)
+		s.aof.Append(s.encoded)
 		if c != nil {
 			c.dirty = true
 		}
+	}
+	if replicating {
+		s.leader.feed(s.encoded)
 	}
 }

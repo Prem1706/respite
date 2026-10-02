@@ -38,11 +38,16 @@ type testServer struct {
 
 func start(t *testing.T, cfg Config) *testServer {
 	t.Helper()
+	return startOn(t, "127.0.0.1:0", cfg)
+}
+
+func startOn(t *testing.T, addr string, cfg Config) *testServer {
+	t.Helper()
 	s, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}

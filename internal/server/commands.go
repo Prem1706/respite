@@ -62,6 +62,8 @@ func init() {
 		"subscribe":     {arity: -2, fn: cmdSubscribe, pubsub: true},
 		"unsubscribe":   {arity: -1, fn: cmdUnsubscribe, pubsub: true},
 		"info":          {arity: -1, fn: cmdInfo},
+		"psync":         {arity: 3, fn: cmdPSync},
+		"replconf":      {arity: -1, fn: cmdReplConf},
 		"quit":          {arity: -1, fn: cmdQuit, pubsub: true},
 		// redis-cli and redis-benchmark send these on connect. Empty replies
 		// are enough to keep them happy.
@@ -85,6 +87,8 @@ func (s *Server) dispatch(c *client, args [][]byte) {
 		c.w.Error("ERR wrong number of arguments for '" + name + "' command")
 	case len(c.subs) > 0 && !cmd.pubsub:
 		c.w.Error("ERR Can't execute '" + name + "': only SUBSCRIBE / UNSUBSCRIBE / PING / QUIT are allowed in this context")
+	case cmd.write && s.follower != nil:
+		c.w.Error("READONLY You can't write against a read only replica.")
 	default:
 		if cmd.write {
 			s.writeMu.Lock()
@@ -388,6 +392,7 @@ func cmdInfo(s *Server, c *client, args [][]byte) {
 		int(time.Since(s.started).Seconds()))
 	fmt.Fprintf(&b, "\r\n# Clients\r\nconnected_clients:%d\r\n", s.clientCount())
 	fmt.Fprintf(&b, "\r\n# Persistence\r\naof_enabled:%d\r\n", boolInt(s.aof != nil))
+	s.replicationInfo(&b)
 	fmt.Fprintf(&b, "\r\n# Keyspace\r\ndb0:keys=%d\r\n", s.store.Len())
 	c.w.BulkString(b.String())
 }

@@ -48,7 +48,6 @@ type AOF struct {
 	mu     sync.Mutex
 	f      *os.File
 	w      *bufio.Writer
-	buf    []byte
 	policy FsyncPolicy
 
 	stop chan struct{}
@@ -71,13 +70,12 @@ func Open(path string, policy FsyncPolicy) (*AOF, error) {
 	return a, nil
 }
 
-// Append adds a command to the in-memory buffer. It is not written to the
-// file until Flush.
-func (a *AOF) Append(args [][]byte) {
+// Append adds RESP-encoded commands to the in-memory buffer. They are not
+// written to the file until Flush.
+func (a *AOF) Append(cmds []byte) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.buf = resp.AppendCommand(a.buf[:0], args)
-	a.w.Write(a.buf) // errors are sticky and reported by Flush
+	a.w.Write(cmds) // errors are sticky and reported by Flush
 }
 
 // Flush writes buffered commands to the file, and fsyncs too under the
@@ -149,8 +147,7 @@ func Replay(path string, apply func(args [][]byte) error) (commands int, truncat
 	}
 	defer f.Close()
 
-	cr := &countingReader{r: f}
-	rd := resp.NewReader(cr)
+	rd := resp.NewReader(f)
 	var good int64 // file offset just after the last complete command
 	for {
 		args, err := rd.ReadCommand()
@@ -158,11 +155,14 @@ func Replay(path string, apply func(args [][]byte) error) (commands int, truncat
 		case err == io.EOF:
 			return commands, 0, nil
 		case err == io.ErrUnexpectedEOF:
-			size := cr.n
+			info, err := f.Stat()
+			if err != nil {
+				return commands, 0, err
+			}
 			if err := os.Truncate(path, good); err != nil {
 				return commands, 0, err
 			}
-			return commands, size - good, nil
+			return commands, info.Size() - good, nil
 		case err != nil:
 			return commands, 0, fmt.Errorf("aof: bad data at byte %d: %w", good, err)
 		}
@@ -172,20 +172,6 @@ func Replay(path string, apply func(args [][]byte) error) (commands int, truncat
 			}
 			commands++
 		}
-		good = cr.n - int64(rd.Buffered())
+		good = rd.Offset()
 	}
-}
-
-// countingReader tracks how many bytes have been read from the file. Minus
-// what the RESP reader has buffered but not parsed, that gives the file
-// offset of the next command.
-type countingReader struct {
-	r io.Reader
-	n int64
-}
-
-func (c *countingReader) Read(p []byte) (int, error) {
-	n, err := c.r.Read(p)
-	c.n += int64(n)
-	return n, err
 }

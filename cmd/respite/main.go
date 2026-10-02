@@ -18,6 +18,7 @@ func main() {
 	addr := flag.String("addr", ":6379", "address to listen on")
 	aofPath := flag.String("aof", "appendonly.aof", "append-only file (empty string disables persistence)")
 	fsync := flag.String("appendfsync", "everysec", "when to fsync the AOF: always, everysec or no")
+	replicaOf := flag.String("replicaof", "", "run as a read-only follower of the leader at host:port")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -27,7 +28,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	srv, err := server.New(server.Config{AOFPath: *aofPath, Fsync: policy, Logger: log})
+	srv, err := server.New(server.Config{AOFPath: *aofPath, Fsync: policy, ReplicaOf: *replicaOf, Logger: log})
 	if err != nil {
 		log.Error("startup failed", "err", err)
 		os.Exit(1)
@@ -47,7 +48,7 @@ func main() {
 		srv.Close()
 	}()
 
-	log.Info("ready to accept connections", "addr", ln.Addr().String(), "aof", *aofPath)
+	log.Info("ready to accept connections", "addr", ln.Addr().String(), "aof", *aofPath, "replicaof", *replicaOf)
 	if err := srv.Serve(ln); err != nil {
 		log.Error("serve failed", "err", err)
 	}

@@ -30,10 +30,22 @@ func (e ProtocolError) Error() string { return "Protocol error: " + string(e) }
 
 type Reader struct {
 	br *bufio.Reader
+	cr *countingReader
 }
 
 func NewReader(r io.Reader) *Reader {
-	return &Reader{br: bufio.NewReaderSize(r, 64*1024)}
+	cr := &countingReader{r: r}
+	return &Reader{br: bufio.NewReaderSize(cr, 64*1024), cr: cr}
+}
+
+// Offset returns how many bytes of the stream the commands read so far took
+// up. It doesn't count bytes buffered for commands not yet parsed.
+func (r *Reader) Offset() int64 { return r.cr.n - int64(r.br.Buffered()) }
+
+// ReadBulk reads a single bulk string ($<length>\r\n<data>\r\n).
+func (r *Reader) ReadBulk() ([]byte, error) {
+	b, err := r.readBulk()
+	return b, unexpected(err)
 }
 
 // Buffered returns how many bytes have been received but not parsed yet. If
@@ -121,6 +133,17 @@ func parseInline(line []byte) [][]byte {
 		args[i] = append([]byte(nil), f...) // line is reused by the next read
 	}
 	return args
+}
+
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 func unexpected(err error) error {

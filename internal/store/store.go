@@ -355,6 +355,34 @@ func (s *Store) TTL(key string) int64 {
 	}
 }
 
+// Dump calls emit with commands that rebuild the current keyspace from
+// empty: a SET or ZADD per key, then PEXPIREAT for keys with a TTL. A new
+// follower receives this as its starting snapshot. Expired keys are skipped.
+func (s *Store) Dump(emit func(args ...[]byte)) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	now := s.now()
+	for k, e := range s.data {
+		if e.expired(now) {
+			continue
+		}
+		key := []byte(k)
+		switch v := e.val.(type) {
+		case []byte:
+			emit([]byte("SET"), key, v)
+		case *zset.ZSet:
+			args := [][]byte{[]byte("ZADD"), key}
+			for _, m := range v.All() {
+				args = append(args, []byte(zset.FormatScore(m.Score)), []byte(m.Name))
+			}
+			emit(args...)
+		}
+		if e.expireAt != 0 {
+			emit([]byte("PEXPIREAT"), key, strconv.AppendInt(nil, e.expireAt, 10))
+		}
+	}
+}
+
 // Keys returns every live key that matches a glob pattern. It walks the
 // whole keyspace, so like Redis' KEYS it is O(n).
 func (s *Store) Keys(pattern string) []string {

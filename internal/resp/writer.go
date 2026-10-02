@@ -53,6 +53,9 @@ func (w *Writer) Null() { w.bw.WriteString("$-1\r\n") }
 // Array writes an array header. The caller then writes n elements.
 func (w *Writer) Array(n int) { w.header('*', int64(n)) }
 
+// Raw writes bytes that are already RESP-encoded.
+func (w *Writer) Raw(b []byte) { w.bw.Write(b) }
+
 // Flush sends everything buffered so far. Write errors are sticky inside
 // bufio.Writer, so this is the one place they need to be checked.
 func (w *Writer) Flush() error { return w.bw.Flush() }
