@@ -38,6 +38,7 @@ type Server struct {
 	store   *store.Store
 	aof     *aof.AOF // nil when persistence is off, and while the AOF is replaying
 	broker  *broker
+	metrics *metrics
 	log     *slog.Logger
 	started time.Time
 
@@ -66,6 +67,7 @@ func New(cfg Config) (*Server, error) {
 	s := &Server{
 		store:   store.New(),
 		broker:  newBroker(),
+		metrics: newMetrics(),
 		log:     cfg.Logger,
 		started: time.Now(),
 		clients: make(map[*client]struct{}),
@@ -148,6 +150,7 @@ func (s *Server) Serve(ln net.Listener) error {
 			}
 			return err
 		}
+		s.metrics.conns.Add(1)
 		c := newClient(s, conn)
 		if !s.track(c) {
 			conn.Close()

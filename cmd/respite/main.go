@@ -6,6 +6,7 @@ import (
 	"flag"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -19,6 +20,7 @@ func main() {
 	aofPath := flag.String("aof", "appendonly.aof", "append-only file (empty string disables persistence)")
 	fsync := flag.String("appendfsync", "everysec", "when to fsync the AOF: always, everysec or no")
 	replicaOf := flag.String("replicaof", "", "run as a read-only follower of the leader at host:port")
+	metricsAddr := flag.String("metrics", "", "serve Prometheus metrics at http://<addr>/metrics, e.g. :9121")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -37,6 +39,17 @@ func main() {
 	if err != nil {
 		log.Error("listen failed", "err", err)
 		os.Exit(1)
+	}
+
+	if *metricsAddr != "" {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", srv.MetricsHandler())
+		go func() {
+			log.Info("serving metrics", "addr", *metricsAddr)
+			if err := http.ListenAndServe(*metricsAddr, mux); err != nil {
+				log.Error("metrics server failed", "err", err)
+			}
+		}()
 	}
 
 	// On Ctrl-C or SIGTERM, shut down cleanly so the AOF is flushed and fsynced.

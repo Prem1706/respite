@@ -82,19 +82,27 @@ func (s *Server) dispatch(c *client, args [][]byte) {
 	cmd, ok := commands[name]
 	switch {
 	case !ok:
+		s.metrics.rejected.Add(1)
 		c.w.Error(fmt.Sprintf("ERR unknown command '%.64s'", args[0]))
 	case (cmd.arity > 0 && len(args) != cmd.arity) || len(args) < -cmd.arity:
+		s.metrics.rejected.Add(1)
 		c.w.Error("ERR wrong number of arguments for '" + name + "' command")
 	case len(c.subs) > 0 && !cmd.pubsub:
+		s.metrics.rejected.Add(1)
 		c.w.Error("ERR Can't execute '" + name + "': only SUBSCRIBE / UNSUBSCRIBE / PING / QUIT are allowed in this context")
 	case cmd.write && s.follower != nil:
+		s.metrics.rejected.Add(1)
 		c.w.Error("READONLY You can't write against a read only replica.")
 	default:
+		start := time.Now()
 		if cmd.write {
 			s.writeMu.Lock()
-			defer s.writeMu.Unlock()
+			cmd.fn(s, c, args)
+			s.writeMu.Unlock()
+		} else {
+			cmd.fn(s, c, args)
 		}
-		cmd.fn(s, c, args)
+		s.metrics.observe(name, time.Since(start))
 	}
 }
 

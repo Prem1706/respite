@@ -56,6 +56,7 @@ type Store struct {
 	now      func() int64
 	passive  bool
 	onExpire func(key string)
+	expired  int64 // keys deleted because their TTL passed; guarded by mu
 }
 
 func New() *Store {
@@ -118,6 +119,7 @@ func (s *Store) lookupWrite(key string, now int64) (entry, bool) {
 
 func (s *Store) expire(key string) {
 	s.remove(key)
+	s.expired++
 	if s.onExpire != nil {
 		s.onExpire(key)
 	}
@@ -396,6 +398,13 @@ func (s *Store) Keys(pattern string) []string {
 		}
 	}
 	return keys
+}
+
+// ExpiredKeys returns how many keys have been deleted because their TTL passed.
+func (s *Store) ExpiredKeys() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.expired
 }
 
 // Len returns the number of keys. It can include expired keys that haven't
