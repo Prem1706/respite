@@ -396,14 +396,54 @@ func cmdUnsubscribe(s *Server, c *client, args [][]byte) {
 	}
 }
 
+// INFO [section ...] describes the server. With no section, or "default",
+// "all" or "everything", every section is written; otherwise only the ones
+// named, so `INFO replication` returns just that. Unknown sections are
+// ignored, and naming none that exist gives an empty reply, as in Redis.
 func cmdInfo(s *Server, c *client, args [][]byte) {
+	sections := []struct {
+		name  string
+		write func(b *strings.Builder)
+	}{
+		{"server", func(b *strings.Builder) {
+			fmt.Fprintf(b, "# Server\r\nredis_version:7.0.0\r\nrespite:1\r\nuptime_in_seconds:%d\r\n",
+				int(time.Since(s.started).Seconds()))
+		}},
+		{"clients", func(b *strings.Builder) {
+			fmt.Fprintf(b, "# Clients\r\nconnected_clients:%d\r\n", s.clientCount())
+		}},
+		{"persistence", func(b *strings.Builder) {
+			fmt.Fprintf(b, "# Persistence\r\naof_enabled:%d\r\n", boolInt(s.aof != nil))
+		}},
+		{"replication", s.replicationInfo},
+		{"keyspace", func(b *strings.Builder) {
+			fmt.Fprintf(b, "# Keyspace\r\ndb0:keys=%d\r\n", s.store.Len())
+		}},
+	}
+	want := map[string]bool{}
+	for _, a := range args[1:] {
+		switch name := strings.ToLower(string(a)); name {
+		case "default", "all", "everything":
+			want = nil
+		default:
+			if want != nil {
+				want[name] = true
+			}
+		}
+	}
+	if want != nil && len(want) == 0 {
+		want = nil
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Server\r\nredis_version:7.0.0\r\nrespite:1\r\nuptime_in_seconds:%d\r\n",
-		int(time.Since(s.started).Seconds()))
-	fmt.Fprintf(&b, "\r\n# Clients\r\nconnected_clients:%d\r\n", s.clientCount())
-	fmt.Fprintf(&b, "\r\n# Persistence\r\naof_enabled:%d\r\n", boolInt(s.aof != nil))
-	s.replicationInfo(&b)
-	fmt.Fprintf(&b, "\r\n# Keyspace\r\ndb0:keys=%d\r\n", s.store.Len())
+	for _, sec := range sections {
+		if want != nil && !want[sec.name] {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("\r\n")
+		}
+		sec.write(&b)
+	}
 	c.w.BulkString(b.String())
 }
 
