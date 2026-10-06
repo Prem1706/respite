@@ -154,6 +154,27 @@ func TestBasicCommands(t *testing.T) {
 	expect(t, c.do("DBSIZE"), "0")
 }
 
+func TestInfoSections(t *testing.T) {
+	c := dial(t, start(t, Config{}))
+	headers := func(reply string) (out []string) {
+		for _, line := range strings.Split(reply, "\r\n") {
+			if strings.HasPrefix(line, "# ") {
+				out = append(out, line[2:])
+			}
+		}
+		return out
+	}
+	all := []string{"Server", "Clients", "Persistence", "Replication", "Keyspace"}
+	expect(t, fmt.Sprint(headers(c.do("INFO"))), fmt.Sprint(all))
+	expect(t, fmt.Sprint(headers(c.do("INFO", "everything"))), fmt.Sprint(all))
+	expect(t, fmt.Sprint(headers(c.do("INFO", "replication"))), "[Replication]")
+	expect(t, fmt.Sprint(headers(c.do("INFO", "KEYSPACE", "server"))), "[Server Keyspace]")
+	expect(t, c.do("INFO", "nosuchsection"), "")
+	if r := c.do("INFO", "replication"); !strings.HasPrefix(r, "# Replication\r\nrole:master") {
+		t.Fatalf("INFO replication = %q", r)
+	}
+}
+
 func TestSetOptions(t *testing.T) {
 	c := dial(t, start(t, Config{}))
 	expect(t, c.do("SET", "k", "1", "XX"), "(nil)")

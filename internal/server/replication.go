@@ -410,7 +410,7 @@ func (s *Server) setLeaderConn(conn net.Conn) bool {
 
 // replicationInfo writes the "# Replication" section of INFO.
 func (s *Server) replicationInfo(b *strings.Builder) {
-	b.WriteString("\r\n# Replication\r\n")
+	b.WriteString("# Replication\r\n")
 	if f := s.follower; f != nil {
 		f.mu.Lock()
 		status, id := "down", f.id
