@@ -13,12 +13,14 @@ import (
 	"bufio"
 	"bytes"
 	"io"
+	"slices"
 	"strconv"
 )
 
 const (
 	maxArgs     = 1024 * 1024
 	maxBulkSize = 512 * 1024 * 1024 // the same limit real Redis uses
+	readChunk   = 64 * 1024
 )
 
 // ProtocolError means the client sent bytes that are not valid RESP. There is
@@ -75,11 +77,15 @@ func (r *Reader) ReadCommand() ([][]byte, error) {
 	if n <= 0 {
 		return nil, nil
 	}
-	args := make([][]byte, n)
-	for i := range args {
-		if args[i], err = r.readBulk(); err != nil {
+	// Don't trust the count for the allocation: "*1000000" costs nothing to
+	// send. Grow the slice as arguments actually arrive instead.
+	args := make([][]byte, 0, min(n, 64))
+	for range n {
+		arg, err := r.readBulk()
+		if err != nil {
 			return nil, unexpected(err)
 		}
+		args = append(args, arg)
 	}
 	return args, nil
 }
@@ -96,10 +102,17 @@ func (r *Reader) readBulk() ([]byte, error) {
 	if err != nil || size < 0 || size > maxBulkSize {
 		return nil, ProtocolError("invalid bulk length")
 	}
-	// Read the value and its trailing \r\n in one go.
-	buf := make([]byte, size+2)
-	if _, err := io.ReadFull(r.br, buf); err != nil {
-		return nil, err
+	// Read the value and its trailing \r\n, at most readChunk bytes at a
+	// time. Allocating size+2 bytes up front would let a client make the
+	// server reserve 512 MB just by sending "$536870912" and nothing else.
+	total := size + 2
+	buf := make([]byte, 0, min(total, readChunk))
+	for len(buf) < total {
+		n := min(total-len(buf), readChunk)
+		buf = slices.Grow(buf, n)[:len(buf)+n]
+		if _, err := io.ReadFull(r.br, buf[len(buf)-n:]); err != nil {
+			return nil, err
+		}
 	}
 	if buf[size] != '\r' || buf[size+1] != '\n' {
 		return nil, ProtocolError("bulk string not terminated by CRLF")
