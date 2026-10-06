@@ -1,0 +1,52 @@
+# A leader, two followers, Prometheus and Grafana.
+#
+#   docker compose up -d --build
+#
+# Leader:     redis-cli -p 6379
+# Followers:  redis-cli -p 6380, redis-cli -p 6381 (read-only)
+# Grafana:    http://localhost:3000 (dashboard opens on the home page)
+# Prometheus: http://localhost:9090
+
+x-respite: &respite
+  build: .
+  image: respite:latest
+  restart: unless-stopped
+
+services:
+  leader:
+    <<: *respite
+    command: ["-aof", "/data/appendonly.aof", "-metrics", ":9121"]
+    ports: ["6379:6379"]
+    volumes: ["leader-data:/data"]
+
+  follower-1:
+    <<: *respite
+    command: ["-aof", "", "-metrics", ":9121", "-replicaof", "leader:6379"]
+    ports: ["6380:6379"]
+    depends_on: [leader]
+
+  follower-2:
+    <<: *respite
+    command: ["-aof", "", "-metrics", ":9121", "-replicaof", "leader:6379"]
+    ports: ["6381:6379"]
+    depends_on: [leader]
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    volumes: ["./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/respite.json
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+
+volumes:
+  leader-data:

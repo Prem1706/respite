@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: respite
+    static_configs:
+      - targets: ["leader:9121"]
+        labels: { node: leader }
+      - targets: ["follower-1:9121"]
+        labels: { node: follower-1 }
+      - targets: ["follower-2:9121"]
+        labels: { node: follower-2 }

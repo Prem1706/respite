@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Prem1706/respite/internal/aof"
@@ -54,6 +55,8 @@ type Server struct {
 	ln      net.Listener
 	clients map[*client]struct{}
 	closed  bool
+
+	nextClientID atomic.Int64
 
 	wg        sync.WaitGroup // client connections
 	bg        sync.WaitGroup // background loops

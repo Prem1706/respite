@@ -18,7 +18,9 @@ type client struct {
 	wmu sync.Mutex
 	w   *resp.Writer
 
-	dirty   bool // wrote to the AOF since it was last flushed
+	id      int64
+	name    string // set by CLIENT SETNAME or HELLO SETNAME
+	dirty   bool   // wrote to the AOF since it was last flushed
 	quit    bool
 	replica *replica // set if this connection is a follower that sent PSYNC
 
@@ -31,6 +33,7 @@ type client struct {
 
 func newClient(s *Server, conn net.Conn) *client {
 	return &client{
+		id:   s.nextClientID.Add(1),
 		s:    s,
 		conn: conn,
 		r:    resp.NewReader(conn),
@@ -88,7 +91,7 @@ func (c *client) pump() {
 			return
 		case m := <-c.msgs:
 			c.wmu.Lock()
-			c.w.Array(3)
+			c.w.Push(3)
 			c.w.BulkString("message")
 			c.w.BulkString(m.channel)
 			c.w.Bulk(m.payload)

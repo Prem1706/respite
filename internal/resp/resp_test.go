@@ -134,3 +134,26 @@ func TestReadBulk(t *testing.T) {
 		t.Fatalf("truncated bulk: got %v", err)
 	}
 }
+
+func TestWriterRESP3(t *testing.T) {
+	for _, tc := range []struct {
+		proto int
+		want  string
+	}{
+		{2, "$-1\r\n*2\r\n$1\r\nk\r\n$3\r\n1.5\r\n*3\r\n"},
+		{3, "_\r\n%1\r\n$1\r\nk\r\n,1.5\r\n>3\r\n"},
+	} {
+		var buf bytes.Buffer
+		w := NewWriter(&buf)
+		w.Proto = tc.proto
+		w.Null()
+		w.Map(1)
+		w.BulkString("k")
+		w.Double("1.5")
+		w.Push(3)
+		w.Flush()
+		if buf.String() != tc.want {
+			t.Errorf("RESP%d: got %q, want %q", tc.proto, buf.String(), tc.want)
+		}
+	}
+}

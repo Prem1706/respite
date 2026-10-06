@@ -39,7 +39,7 @@ run() {
 
 echo "Requests: $REQUESTS, clients: $CLIENTS, AOF: ${AOF:-0}, CPU: $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m)"
 echo
-echo "| Command | Pipeline | Redis ops/s | Respite ops/s | Respite / Redis | Redis p50 / p99 ms | Respite p50 / p99 ms |"
+echo "| Command | Pipeline | Redis ops/s | Respite ops/s | Respite vs Redis | Redis p50 / p99 ms | Respite p50 / p99 ms |"
 echo "|---|---|---|---|---|---|---|"
 for pipeline in 1 16; do
   paste -d, <(run $REDIS_PORT "$pipeline") <(run $RESPITE_PORT "$pipeline") |

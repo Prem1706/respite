@@ -1,0 +1,6 @@
+.git
+.github
+*.aof
+respite
+deploy
+bench

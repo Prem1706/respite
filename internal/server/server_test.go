@@ -100,8 +100,10 @@ func (c *conn) read() string {
 	}
 	line = strings.TrimSuffix(line, "\r\n")
 	switch line[0] {
-	case '+', ':':
+	case '+', ':', ',':
 		return line[1:]
+	case '_':
+		return "(nil)"
 	case '-':
 		return "(error) " + line[1:]
 	case '$':
@@ -114,8 +116,11 @@ func (c *conn) read() string {
 			c.t.Fatal(err)
 		}
 		return string(buf[:n])
-	case '*':
+	case '*', '>', '%': // arrays, RESP3 pushes, and RESP3 maps (as key value key value ...)
 		n, _ := strconv.Atoi(line[1:])
+		if line[0] == '%' {
+			n *= 2
+		}
 		parts := make([]string, n)
 		for i := range parts {
 			parts[i] = c.read()

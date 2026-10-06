@@ -126,7 +126,7 @@ func cmdZIncrBy(s *Server, c *client, args [][]byte) {
 		c.w.Error(errNaNResult)
 	default:
 		s.propagate(c, []byte("ZADD"), args[1], []byte(formatScore(score)), args[3])
-		c.w.BulkString(formatScore(score))
+		c.w.Double(formatScore(score))
 	}
 }
 
@@ -162,7 +162,7 @@ func cmdZScore(s *Server, c *client, args [][]byte) {
 	case err != nil:
 		replyErr(c, err)
 	case found:
-		c.w.BulkString(formatScore(score))
+		c.w.Double(formatScore(score))
 	default:
 		c.w.Null()
 	}
@@ -290,16 +290,25 @@ func cmdZCount(s *Server, c *client, args [][]byte) {
 	c.w.Integer(int64(n))
 }
 
+// writeMembers replies with members, and optionally their scores. RESP2
+// flattens these into [member score member score ...]; RESP3 sends
+// [[member score] [member score] ...] with real doubles, as Redis 7 does.
 func writeMembers(c *client, members []zset.Member, withScores bool) {
-	if withScores {
-		c.w.Array(2 * len(members))
-	} else {
+	switch {
+	case !withScores:
 		c.w.Array(len(members))
+	case c.w.Proto == 3:
+		c.w.Array(len(members))
+	default:
+		c.w.Array(2 * len(members))
 	}
 	for _, m := range members {
+		if withScores && c.w.Proto == 3 {
+			c.w.Array(2)
+		}
 		c.w.BulkString(m.Name)
 		if withScores {
-			c.w.BulkString(formatScore(m.Score))
+			c.w.Double(formatScore(m.Score))
 		}
 	}
 }

@@ -63,6 +63,8 @@ func init() {
 		"unsubscribe":   {arity: -1, fn: cmdUnsubscribe, pubsub: true},
 		"info":          {arity: -1, fn: cmdInfo},
 		"psync":         {arity: 3, fn: cmdPSync},
+		"hello":         {arity: -1, fn: cmdHello, pubsub: true},
+		"client":        {arity: -2, fn: cmdClient},
 		"replconf":      {arity: -1, fn: cmdReplConf},
 		"quit":          {arity: -1, fn: cmdQuit, pubsub: true},
 		// redis-cli and redis-benchmark send these on connect. Empty replies
@@ -116,7 +118,7 @@ func cmdPing(s *Server, c *client, args [][]byte) {
 	switch {
 	case len(args) > 2:
 		c.w.Error("ERR wrong number of arguments for 'ping' command")
-	case len(c.subs) > 0: // subscribed clients get PONG as a push-style array
+	case len(c.subs) > 0 && c.w.Proto != 3: // RESP2 subscribers get PONG as an array
 		c.w.Array(2)
 		c.w.BulkString("pong")
 		if len(args) == 2 {
@@ -361,7 +363,7 @@ func cmdSubscribe(s *Server, c *client, args [][]byte) {
 			c.subs[name] = struct{}{}
 			s.broker.subscribe(c, name)
 		}
-		c.w.Array(3)
+		c.w.Push(3)
 		c.w.BulkString("subscribe")
 		c.w.Bulk(ch)
 		c.w.Integer(int64(len(c.subs)))
@@ -376,7 +378,7 @@ func cmdUnsubscribe(s *Server, c *client, args [][]byte) {
 		}
 	}
 	if len(channels) == 0 {
-		c.w.Array(3)
+		c.w.Push(3)
 		c.w.BulkString("unsubscribe")
 		c.w.Null()
 		c.w.Integer(0)
@@ -387,7 +389,7 @@ func cmdUnsubscribe(s *Server, c *client, args [][]byte) {
 			delete(c.subs, ch)
 			s.broker.unsubscribe(c, ch)
 		}
-		c.w.Array(3)
+		c.w.Push(3)
 		c.w.BulkString("unsubscribe")
 		c.w.BulkString(ch)
 		c.w.Integer(int64(len(c.subs)))
@@ -403,6 +405,88 @@ func cmdInfo(s *Server, c *client, args [][]byte) {
 	s.replicationInfo(&b)
 	fmt.Fprintf(&b, "\r\n# Keyspace\r\ndb0:keys=%d\r\n", s.store.Len())
 	c.w.BulkString(b.String())
+}
+
+// HELLO [protover [AUTH username password] [SETNAME name]] switches the
+// connection to RESP2 or RESP3 and describes the server. Current client
+// libraries, including redis-py and go-redis, send HELLO 3 as soon as they
+// connect.
+func cmdHello(s *Server, c *client, args [][]byte) {
+	proto := c.w.Proto
+	if len(args) > 1 {
+		v, err := strconv.Atoi(string(args[1]))
+		if err != nil {
+			c.w.Error("ERR Protocol version is not an integer or out of range")
+			return
+		}
+		if v != 2 && v != 3 {
+			c.w.Error("NOPROTO unsupported protocol version")
+			return
+		}
+		for i := 2; i < len(args); i++ {
+			switch strings.ToUpper(string(args[i])) {
+			case "SETNAME":
+				if i+1 == len(args) {
+					c.w.Error(errSyntax)
+					return
+				}
+				c.name = string(args[i+1])
+				i++
+			case "AUTH":
+				c.w.Error("ERR AUTH is not supported: this server has no passwords")
+				return
+			default:
+				c.w.Error(errSyntax)
+				return
+			}
+		}
+		proto = v
+	}
+	c.w.Proto = proto
+	if proto == 0 {
+		proto = 2
+	}
+	role := "master"
+	if s.follower != nil {
+		role = "replica"
+	}
+	c.w.Map(7)
+	c.w.BulkString("server")
+	c.w.BulkString("respite")
+	c.w.BulkString("version")
+	c.w.BulkString("7.0.0")
+	c.w.BulkString("proto")
+	c.w.Integer(int64(proto))
+	c.w.BulkString("id")
+	c.w.Integer(c.id)
+	c.w.BulkString("mode")
+	c.w.BulkString("standalone")
+	c.w.BulkString("role")
+	c.w.BulkString(role)
+	c.w.BulkString("modules")
+	c.w.Array(0)
+}
+
+// CLIENT ID | GETNAME | SETNAME name | SETINFO attr value. Client libraries
+// send SETNAME and SETINFO when they connect.
+func cmdClient(s *Server, c *client, args [][]byte) {
+	switch sub := strings.ToUpper(string(args[1])); {
+	case sub == "ID" && len(args) == 2:
+		c.w.Integer(c.id)
+	case sub == "GETNAME" && len(args) == 2:
+		if c.name == "" {
+			c.w.Null()
+		} else {
+			c.w.BulkString(c.name)
+		}
+	case sub == "SETNAME" && len(args) == 3:
+		c.name = string(args[2])
+		c.w.SimpleString("OK")
+	case sub == "SETINFO" && len(args) == 4:
+		c.w.SimpleString("OK") // library name and version; nothing uses them
+	default:
+		c.w.Error("ERR unknown subcommand or wrong number of arguments for 'client|" + strings.ToLower(sub) + "'")
+	}
 }
 
 func cmdQuit(s *Server, c *client, args [][]byte) {
@@ -427,10 +511,10 @@ func cmdConfig(s *Server, c *client, args [][]byte) {
 	param := strings.ToLower(string(args[2]))
 	v, ok := settings[param]
 	if !ok {
-		c.w.Array(0)
+		c.w.Map(0)
 		return
 	}
-	c.w.Array(2)
+	c.w.Map(1)
 	c.w.BulkString(param)
 	c.w.BulkString(v)
 }
